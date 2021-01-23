@@ -1,0 +1,195 @@
+---
+title: "Homework 5"
+author: Jeong lim Kim, Jayoung Kang, Hye-Min Jung
+date: "5/20/2020"
+fontsize: 10 pt
+output:
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      #include = TRUE, 
+                      fig.width = 6, fig.height = 4,
+                      results='markup',
+                      warning = FALSE,
+                      cache = TRUE,
+                      digits = 3,
+                      width = 48) 
+```
+We’ll explore casts for ‘drama’ movies from 1980-1999. I’ve limited the data to actors in more than ten productions over this time period (and to movies with more than ten actors).
+
+[1] The actors network has an edge if the two actors were in the same movie. 
+* Plot the entire actors network.
+```{r, cache=TRUE}
+## actors network example
+library(igraph)
+
+### GRAPH
+## read in a graph in the `graphml' format: xml for graphs.
+## it warns about pre-specified ids, but we want this here
+## (these ids match up with the castlists in movies.txt)
+actnet <- read.graph("actors.graphml",format="graphml")
+actnet_edgelist <- as_edgelist(actnet, names = TRUE)
+act_network <- graph.edgelist(actnet_edgelist, directed=FALSE)
+
+faction_vertex_shape = get.vertex.attribute(act_network, "Faction")
+
+act_network_degree = degree(act_network)
+
+plot(act_network, 
+     edge.arrow.size=.4, 
+     vertex.shapes = faction_vertex_shape,
+     vertex.size = act_network_degree / sum(act_network_degree)*200,
+     vertex.label=NA, edge.curved=FALSE)
+```
+
+[2] Plot the neighborhoods for “Bacon, Kevin” at orders 1-3. 
+* How does the size of the network change with order?
+  + Adding one extra order creates a much bigger network.
+```{r, cache=TRUE}
+kb <- V(actnet)['Bacon, Kevin']
+V(actnet)$color = "pink"
+V(actnet)['Bacon, Kevin']$color <- "turquoise"
+V(actnet)$frame.color = 0
+V(actnet)$label.color = "black"
+kblink1 <- graph.neighborhood(actnet, order = 1, nodes = kb)[[1]]
+plot(kblink1, edge.curved=FALSE, vertex.label = NA)
+
+kblink2 <- graph.neighborhood(actnet, order = 2, nodes = kb)[[1]]
+plot(kblink2, edge.curved=FALSE, vertex.label = NA)
+
+kblink3 <- graph.neighborhood(actnet, order = 3, nodes = kb)[[1]]
+plot(kblink3, edge.curved=FALSE, vertex.label = NA)
+```
+
+
+
+
+```{r, cache=TRUE}
+### TRANSACTION
+## read in the table of actor ids for movies
+## this is a bit complex, because the movie names
+## contain all sorts of special characters.
+
+movies <- read.table("movies.txt", sep="\t", 
+	row.names=1, as.is=TRUE, comment.char="", quote="")
+
+## it's a 1 column matrix.  treat it like a vector
+
+movies <- drop(as.matrix(movies))
+
+## each element is a comma-separated set of actor ids.  
+## use `strsplit' to break these out
+
+movies <- strsplit(movies,",")
+
+## and finally, match ids to names from actnet
+
+casts <- lapply(movies, 
+	function(m) V(actnet)$name[match(m,V(actnet)$id)])
+
+## check it
+
+casts['12 Bucks']
+
+
+## format as arules transaction baskets
+
+library(arules)
+
+casttrans <- as(casts, "transactions")
+
+dim(casttrans) #14326 movies  6953 actors
+
+## Set up STM information
+
+castsize <- unlist(lapply(casts, function(m) length(m)))
+
+## see ?rep.int: we're just repeating movie names for each cast member
+?rep.int
+acti <- factor(rep.int(names(casts),times=castsize))
+
+## actors
+
+actj <- factor(unlist(casts), levels=V(actnet)$name)
+
+## format as STM (if you specify without `x', its binary 0/1)
+
+actmat <- sparseMatrix(i=as.numeric(acti),j=as.numeric(actj),
+		dimnames=list(movie=levels(acti),actor=levels(actj)))
+
+## count the number of appearences by actor
+
+nroles <- colSums(actmat)
+
+names(nroles) <- colnames(actmat)
+
+movierules <- apriori(casttrans,
+                      parameter=list(support=0.0001, confidence=0.1, maxlen=2))
+
+# maxlen defines the maximum number of items in each itemset of frequent items.
+
+inspect(movierules)
+
+inspect_movierules <- as.data.frame(inspect(movierules))
+
+pairs <- labels(movierules)
+head(pairs)
+pairs <- gsub("\\{|\\}", "", pairs)
+pairs <- strsplit(pairs, " => ")
+pairs <- do.call(rbind,pairs)
+pairs <- pairs[pairs[,1]!="",]
+head(pairs) # this is edgelist! 
+
+movienet <- graph.edgelist(pairs)
+movienet <- as.undirected(movienet)
+```
+
+[3] 
+* Who were the most common actors (have appeared the most in movies)? 
+  +  Corrêa e Castro, Cláudio
+```{r}
+sort(degree(movienet), decreasing=T)
+```
+* Who were most connected? 
+  + Dobtcheff, Vernon 
+```{r, cache=TRUE}
+sort(degree(actnet), decreasing=T)
+```
+* Pick a pair of actors and describe the shortest path between them.
+  + Pair: from "Dennehy, Brian" to "Neill, Sam"
+  + There's only 1 shortest path between Dennehy and Sam. (Dennehy, Brian Neill, Sam)
+```{r, cache=TRUE}
+all_shortest_paths(actnet, from="Dennehy, Brian", to="Neill, Sam")
+
+DtoN <- get.shortest.paths(actnet, from="Dennehy, Brian", to="Neill, Sam")
+
+DtoN[["vpath"]]
+
+E(actnet)$width <- 2
+E(actnet)$color <- "grey"
+E(actnet, path=DtoN$vpath[[1]])$color <- "blue"
+plot(actnet)
+```
+
+
+[4] Find pairwise actor-cast association rules with at least 0.01% support and 10% confidence. 
+* Describe what you find.
+  + There are densely connected groups, at least 5 community structure going on. 
+```{r, cache=TRUE}
+V(movienet)$color <- "cyan"
+
+plot(movienet, vertex.label=NA, vertex.size=3, edge.curved=FALSE) 
+
+#There are densely connected groups, at least 5 community structure going on. 
+```
+
+
+
+
+
+
+
+
+

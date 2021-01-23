@@ -1,0 +1,206 @@
+---
+title: "BUS 41201 Homework 2 Assignment"
+author: Group 29 (Chloe Fu, Hye-Min Jung, Jayoung Kang, Jeong Lim Kim)
+date: "4/21/2020"
+output:
+  word_document: default 
+  pdf_document: 
+    fig_height: 4
+    fig_width: 6
+fontsize: 10 pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      #include = TRUE, 
+                      fig.width = 6, fig.height = 4,
+                      results='markup',
+                      warning = FALSE,
+                      cache = TRUE,
+                      digits = 3,
+                      width = 48) 
+```
+
+```{r}
+## Read in the data
+orig_homes <- read.csv("homes2004.csv")
+q1homes <- read.csv("homes2004.csv")
+q2homes <- read.csv("homes2004.csv")
+q3homes <- read.csv("homes2004.csv")
+```
+
+```{r, include=FALSE}
+# conditional vs marginal value
+# par(mfrow=c(1,2)) # 1 row, 2 columns of plots 
+# 
+# hist(homes$VALUE, col="grey", xlab="home value", main="")
+# 
+# plot(VALUE ~ factor(BATHS), 
+#     col=rainbow(8), data=homes[homes$BATHS<8,],
+#     xlab="number of bathrooms", ylab="home value")
+```
+
+# Q1. Regress log price onto all variables but mortgage. What is the R2? How many coefficients are used in this model and how many are significant at 10% FDR? Re-run regression with only the significant covariates, and compare R2 to the full model.
+
+```{r}
+## Regress log price onto all variables but mortgage.
+# regress log(PRICE) on everything except AMMORT 
+pricey <- glm(log(LPRICE) ~ .-AMMORT, data=q1homes)
+```
+
+```{r}
+summary(pricey)
+```
+
+```{r}
+#     Null deviance: 13003.4  on 15564  degrees of freedom
+# Residual deviance:  7186.9  on 15523  degrees of freedom
+## What is the R2?
+(R2_full <- 1-(7186.9/13003.4)) #R-squared?  0.447
+```
+
+```{r}
+## How many coefficients are used in this model? 41 excluding intercept, (42 including intercept) 
+print( (15565) -1 -15523)
+
+# (#observation) - #intercept - #coefficients = df Residual deviance
+# (15565) -1 -#coefficients = 15522
+# #coefficients = (155645) -1 -15522 = 41
+```
+
+```{r}
+## How many coefficients are significant at 10% FDR? 36
+# extract pvalues
+pvals <- summary(pricey)$coef[-1,4]
+pvals_ordered <- pvals[order(pvals,decreasing=F)]
+source("fdr.R")
+
+## find the cut
+# @ 10% FDR
+
+cutoff10 <- fdr_cut(pvals,q=0.1)
+print(cutoff10)
+print(sum(pvals<=cutoff10));print(sum(pvals>cutoff10))
+names(pvals)[pvals<=cutoff10] #significant coefficients(36)
+names(pvals)[pvals>cutoff10] #insignificant coefficients(5) "ETRANSY" "NUNITS"  "STATECO" "STATECT" "BEDRMS" 
+```
+
+```{r}
+rerunhomes <- cbind(q1homes, model.matrix(~STATE-1, data=q1homes)) 
+rerunhomes <- rerunhomes[ -c(22) ]
+```
+
+```{r}
+# Model with coefficient significant @10% FDR
+re_pricey <- glm(log(LPRICE) ~ .-AMMORT -ETRANS -NUNITS -STATECO -STATECT -BEDRMS, data=rerunhomes)
+summary(re_pricey)
+```
+
+
+```{r}
+##Compare R2 to the full model 
+#     Null deviance: 13003  on 15564  degrees of freedom
+# Residual deviance:  7187  on 15525  degrees of freedom
+#     Null deviance: 13003.4  on 15564  degrees of freedom
+# Residual deviance:  7188.4  on 15527  degrees of freedom
+(R2_new <- 1-(7188.4/13003.4)) #0.4471907
+print(R2_full - R2_new) #excluding insignificant coefficient(@ 10% FDR) decreased R2 by 0.0001153544
+```
+
+# Q2. Fit a regression for whether the buyer had more than 20 percent down (onto everything but AMMORT and LPRICE). Interpret effects for Pennsylvania state, 1st home buyers and the number  of bathrooms. Add and describe an interaction between 1st home-buyers and the number of baths. 
+```{r, include=FALSE}
+# # create a var for downpayment being greater than 20%
+# orig_homes$gt20dwn <- 
+# 	factor(0.2<(orig_homes$LPRICE-orig_homes$AMMORT)/orig_homes$LPRICE)
+# 
+# # You can try some quick plots.  Do more to build your intuition!
+# par(mfrow=c(1,2))
+# plot(VALUE ~ STATE, data=orig_homes,
+# col=rainbow(nlevels(orig_homes$STATE)),
+# ylim=c(0,10^6), cex.axis=.65)
+# plot(gt20dwn ~ FRSTHO, data=orig_homes,
+# col=c(1,3), xlab="Buyer's First Home?",
+# ylab="Greater than 20% down")
+```
+
+```{r}
+# create a var for downpayment being greater than 20%
+q2homes$gt20dwn <- 
+	factor(0.2<(q2homes$LPRICE-q2homes$AMMORT)/q2homes$LPRICE)
+q2homes$gt20dwn = as.integer(as.logical(q2homes$gt20dwn))
+
+## Fit a regression for whether the buyer had more than 20 percent down (onto everything but AMMORT and LPRICE)
+reg_20dwn <- glm(gt20dwn ~ .-AMMORT -LPRICE, data=q2homes, family='binomial')
+summary(reg_20dwn)
+```
+
+```{r}
+##Interpret effects for Pennsylvania state, 1st home buyers and the number of bathrooms.
+#STATEPA          6.011e-01  1.007e-01   5.968 2.40e-09 ***
+#FRSTHOY         -3.700e-01  5.170e-02  -7.156 8.29e-13 ***
+#BATHS            2.445e-01  3.419e-02   7.152 8.57e-13 ***
+
+
+#times interpretation
+exp(6.011e-01); exp(-3.700e-01); exp(2.445e-01) 
+#% change interpretation 
+(exp(6.011e-01)-1)*100;(exp(-3.700e-01)-1)*100; (exp(2.445e-01)-1)*100
+
+#The odds of the buyer having more than 20% down is 1.824124times higher, when the house state code is Pennsylvania than not in Pennsylvania.      OR
+##The odds of the buyer having more than 20% down increase by 82.41242%, when the house state code is Pennsylvania than not in Pennsylvania.  
+
+#The odds of the buyer having more than 20% down is 0.6907343times higher, when it is first home purchase than that purchase that are not.   OR
+##The odds of the buyer having more than 20% down decrease by 30.92657%, when it is first home purchase than that purchase that are not.
+
+#The odds of the buyer having more than 20% down is 1.276983times higher, for a unit increase in # of bathroom.   OR
+#The odds of the buyer having more than 20% down is increase by 27.69827%, for a unit increase in # of bathroom.
+```
+```{r}
+##Add and describe an interaction between 1st home-buyers and the number of baths. 
+# - don't forget family="binomial"!
+# - use +A*B in forumula to add A interacting with B
+reg_20dwn_interact <- glm(gt20dwn ~ .-AMMORT -LPRICE +BATHS*FRSTHO, data=q2homes, family='binomial')
+summary(reg_20dwn_interact)
+
+#BATHS:FRSTHOY   -2.020e-01  6.207e-02  -3.255 0.001135 ** 
+exp(-2.020e-01); (exp(-2.020e-01)-1)*100
+
+#The odds of the buyer having more than 20% down is 0.8170949times higher for a unit increase in # of rooms amongst first home buyers than a unit increase in # of rooms amongst non-first home buyers. OR 
+
+#The odds of the buyer having more than 20% down is decrease by 18.29051% for a unit increase in # of rooms amongst first home buyers than a unit increase in # of rooms amongst non-first home buyers.  
+
+
+#OR
+
+#-2.020e-01 is the difference between the log-odds ratio in the buyer having more than 20% down, corresponding to a change in # of rooms by 1 unit amongst first home buyers and the the log-odds ratio corresponding to an increase in # of rooms by 1 unit amongst non-first home buyers.
+```
+# Q3. Focus only on a subset of homes worth >100k. Train the full model from Question 1 on this subset. Predict the left-out homes using this model. What is the out-of-sample fit (i.e. R2)? Explain why you get this value. 
+```{r}
+subset <- which(q3homes$VALUE>100000)
+
+## Train the full model from Question 1 on this subset
+hometrain_full <- glm(log(LPRICE) ~ .-AMMORT, data=q3homes[subset,])
+
+## Predict the left-out homes using this model
+phometrain <- predict(hometrain_full, newdata=q3homes[-subset,])
+
+## What is the out-of-sample fit (i.e. R2)? 
+# Use the code ``deviance.R" to compute OOS deviance
+source("deviance.R")
+D <- deviance(y=log(q3homes$LPRICE[-subset]), pred=phometrain)
+# Null model has just one mean parameter
+ybar <- mean(log(q3homes$LPRICE[-subset]))
+D0 <- deviance(y=log(q3homes$LPRICE[-subset]), pred=ybar)
+
+## OOS R2? -0.04988871
+1 - D/D0  
+## Explain why you get this value.
+# R2 compares the fit of the chosen model with that of a horizontal straight line (the null hypothesis). If the chosen model fits worse than a horizontal line, then R2 is negative. 
+# cf. (Note that R2 is not always the square of anything, so it can have a negative value without violating any rules of math. Because, R2 is normally non-negative, negative R2 is not a good sign. R2 tells you what proportion of information can be explained by X for the test data. )
+
+```
+
+
+
+
+

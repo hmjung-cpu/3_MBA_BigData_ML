@@ -1,0 +1,743 @@
+---
+title: "Big Data Midterm 2020 (Discovering Gender Bias in Scientific Citations)"
+author: "Hye-Min Jung"
+date: "5/13/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+#tinytex::install_tinytex()
+library(tinytex)
+library(latex2exp)
+library(rmutil)
+library(gamlr)
+
+# 1.list of authors
+author<-read.table("authorFinal.csv",header=T)
+# 2.Covariates of papers
+paper_covariates<-read.csv("PaperCovariates.txt",sep=",",
+							header=TRUE)
+# 3.Simple triplet matrix for paper - word pairing
+doc_word<-read.table("WordDocCitation.csv", header=F)
+# 4.A list of words used in the title
+words<-read.table("CitationWords.csv",header=F)						
+# 5.A list of papers
+paper<-read.csv("paperList.txt",sep="\"",header=TRUE)
+```
+
+
+## 1.1 
+
+```{r, include=FALSE}
+# QUESTION 1 
+# FDR: we want to pick a few words in paper titles that correlate with citations 
+
+spm<-sparseMatrix(
+		i=doc_word[,1], #V1
+		j=doc_word[,2], #V2
+		x=doc_word[,3], #V3
+		dimnames=list(id=1:nrow(paper),words=words[,1]))
+dim(spm)
+# 3248 research articles 
+# using 686 alphabetically ordered words that occur in the titles of the research articles
+
+# create a dense matrix of ordered words that occur in the titles of the research articles
+P <- as.data.frame(as.matrix(spm>0))
+
+library(parallel)
+Outcome_continuous<-log(paper_covariates$citation+1)
+
+margreg <- function(x){
+	
+	fit <- lm(Outcome_continuous~x)
+
+	sf <- summary(fit)
+
+	return(sf$coef[2,4]) 
+
+}
+
+cl <- makeCluster(detectCores())
+
+# **** FDR Analysis ****
+# Pull out stars and export to cores
+clusterExport(cl,"Outcome_continuous") 
+
+# run the regressions in parallel
+# The p-values are stored in mrgpvals
+mrgpvals <- unlist(parLapply(cl,P,margreg))
+
+# mrgpvals<-apply(P,2,margreg) try this is parallel does not work
+source("fdr.R")
+
+# make sure we have names
+names(mrgpvals) <- colnames(P)
+
+# The p-values are stored in mrgpvals 
+```
+
+* **Plot the p-values.**
+  
+```{r echo=FALSE, fig.width = 4, fig.height = 3, fig.align = "center"}
+######## Continue on your own ######
+hist(mrgpvals,col="lightblue",breaks=10, main = "Figure1: Histogram of p-values", xlab = "p-value") 
+```
+
+
+* **Comment on their p-value distributions.**
+  + The p-value distribution deviates from a uniform distribution, since there is a spike near zero.
+  + This indicates that there are many more small p-values than one would expect if there was no signal. 
+
+* **Is there enough signal to predict citations based on the topic of the article?**
+  + Yes, the spike near zero means hope for signal that there may be some discoveries of covariates that
+reject the null hypothesis. 
+  + This is because there are more p-values close to zero than expected under the null.
+
+
+
+
+## 1.2
+
+* **What is the alpha value (p-value cutoff) associated with 20% False Discovery Rate?**
+  + 0.002881604 is alpha value associated with 20% FDR.
+
+```{r include=FALSE}
+q<-0.2
+cutoff <- fdr_cut(mrgpvals, q)
+print(cutoff)
+```
+
+* **How many words are significant at this level?**
+  + 10 words are significant at this alpha level.
+
+```{r echo=FALSE}
+library(knitr)
+kable(table(mrgpvals<=cutoff))
+```
+
+* **Advantages of FDR for word selection**
+  + As a data screening method, FDR is very powerful and computationally feasible.
+  + We can parse really big data and do that in parallel by We separating the words from one another and look how well each one of them associates with the outcome. 
+  
+* **Disadvantages of FDR for word selection**
+  + FDR analysis is only valid if the p-values are approximately independent.
+  + Therefore, when the p-values are not independent FDR analysis is not valid (ex. when words occur in research articles simultaneously).
+  + Moreover, p-value does not indicate the direction of the association (positive/negative), but only its strength.
+  + Also, FDR has caveat for finding good subset of the inputs that can collectively work together. Because we are looking at regression one at a time for FDR. 
+
+## 1.3
+* **Suppose you just mark the 20 smallest p-values as significant. How many of these discoveries do you expect to be false?** 
+  + Approximately 0 false discoveries expected (to be precise 0.16 FD expected). 
+  + Because, alpha that marks the 20 smallest p-values significant is q=0.008
+  + cf. $0.16=20*0.008$ FD expected, given 20 smallest p-values marked as significant. 
+
+```{r echo = FALSE}
+kable(table(mrgpvals<0.008)) #@q=0.008
+```
+
+* **Are the p-values independent? Discuss.**
+  + For the p-values to be independent, words should not simultaneously occur in research article titles.
+  + But, it is very unrealistic to assume that the words would not appear simultaneously across the resereach articles titles. 
+  + It would be normal to encounter same words repeated in-and-out across articles, given that our analysis is about citations from top 4 statistics journals.
+
+
+
+
+## 2.1 
+Use the LASSO method to come up with a combination of a few words that predict citations.
+
+```{r, include=FALSE}
+# 2.1
+
+# First, let's use just words in `spm` as predictors
+library(gamlr)
+class(spm)
+
+# let's call the columns of the sparse design matrix as the product categories
+
+# Let's fit the LASSO with just the product categories
+lasso1<- gamlr(spm, y=Outcome_continuous, standardize=FALSE, family="gaussian", lambda.min.ratio=1e-3)
+plot(lasso1)
+
+log(lasso1$lambda[which.min(AICc(lasso1))]) # -6.022561 
+
+dev <- lasso1$deviance[which.min(AICc(lasso1))] # this is the deviance #of the AICc selected model
+dev0<- lasso1$deviance[1] # this is the null deviance
+1-dev/dev0 # in sample R square 0.08006071 not much signal
+```
+
+* **Pick a lambda** 
+  + AICc lambda: -6.022561 
+  + cf. This is result of setting STANDARDIZE=FALSE, because we do not want to penalize more for those words that appear more often. If I set STANDARDIZE=TRUE, R would be multiplying the penalty with a standard deviation (s.d.) of the input. Words that are rare will have a smaller s.d. and thereby a smaller penalty than common words. This might be unfair to the commonly used words. 
+  
+* **Comment on the in-sample $R^{2}$.**
+  + 0.08006071 is in-sample $R^{2}$ for the AICc slice of the LASSO path.
+  + In-sample $R^{2}$ "always" improve as the model gets complicated. So we will be always favoring the model that are very comlicated. Therfore, with in-sample $R^{2}$ we cannot compare models fairly. 
+
+* **Is there enough evidence to conclude that title predicts citations?**
+  + Not enough evidence to conclude that title predicts citations with this model. 
+  + Because in-sample $R^{2}$ is misleadingly optimistic for the complicated model.
+  + Also in-sample $R^{2}$ does not give us a sense of how well each model can predict data it has not yet seen.
+
+
+
+## 2.2 
+Repeat the analysis from (2.1) but add extra covariates.
+
+```{r include=FALSE}
+# 2.2
+# Now, let's add more covariates
+# include all the covariates in the matrix 'paper_covariates'
+# be carefull about the treatment of the factor covariates
+
+paper_covariates1 <-
+  sparse.model.matrix( ~ -1 + year + journal + references + seniority_paper + 
+                         nauthors + female_coauthors_paper, data = paper_covariates)
+spm_2 <- cbind(paper_covariates1, spm)
+dim(spm_2)
+
+lasso2<- gamlr(spm_2, y=Outcome_continuous, standardize=TRUE, family="gaussian", lambda.min.ratio=1e-3)
+plot(lasso2)
+
+summary(lasso2) %>%
+  arrange(desc(lambda))
+
+order(coef(lasso2))
+
+
+coef(lasso2)
+
+# top 10 strongest coefficients
+df <- as.data.frame(as.matrix(coef(lasso2)))
+
+
+log(lasso2$lambda[which.min(AICc(lasso2))]) #-3.240777  
+
+dev_2 <- lasso2$deviance[which.min(AICc(lasso2))] # this is the deviance #of the AICc selected model
+dev0_2<- lasso2$deviance[1] # this is the null deviance
+1-dev_2/dev0_2 # in sample R square 0.2135955 /not much signal
+```
+
+* **What is the in-sample $R^{2}$ now?** 
+  + 0.2135955 is in-sample $R^{2}$ for the AICc slice of the LASSO path.
+
+* **Describe the LASSO path** 
+  + Lasso path starts with 687 Non zero coefficients 
+  + Lambda on the x-axis makes coefficients difficult to enter
+  + As a result, when lambda is small, it’s not penalizing much so it starts from full model.
+  + When lambda is big, it’s penalizing a lot so model shrinks until it becomes null model.
+  + Therefore, in the LASSO path, coefficients becomes smaller as it goes to right
+  + The coefficients survive until penalization so large that is pulled toward zero.
+  + Final survivors are the spaghetti lines that goes to the very end.
+
+```{r echo=FALSE, fig.width = 4, fig.height = 3, fig.align = "center"}
+plot(lasso2, xlab="log lambda for LASSO after adding extra covariates (Figure 2)")
+```
+
+* **Pick the top 10 strongest coefficients.** 
+  + output > after > absolute > dantzig > stepup > lasso > profile > singleindex > improving > likelihoodbased
+
+* **What is the interpretation of the coefficient of the word lasso?**
+  + Citation increases by 0.338627554, with each extra word "LASSO" is in the title.
+  + cf. coefficient for word lasso is 0.338627554
+
+
+
+## 2.3
+
+```{r include=FALSE}
+# 2.3 Let's create the binary outcome variable
+
+Outcome<-paper_covariates$citation>0
+
+lasso3<- gamlr(spm_2, y=Outcome, standardize=TRUE, family="binomial", lambda.min.ratio=1e-3)
+plot(lasso3)
+
+log(lasso3$lambda[which.min(AICc(lasso3))]) #-4.106775   
+
+dev_3 <- lasso3$deviance[which.min(AICc(lasso3))] # this is the deviance #of the AICc selected model
+dev0_3<- lasso3$deviance[1] # this is the null deviance
+1-dev_3/dev0_3 # in sample R square 0.1375619 /not much signal
+
+naive_lasso <- lasso3
+coef(naive_lasso)["female_coauthors_paper",]
+```
+
+* **What is the in-sample $R^{2}$ now?**
+  + 0.1375619 is in-sample $R^{2}$ now.
+
+* **What is the interpretation of the coefficient seniority and female-coauthors.** 
+  + The odds of paper being cited increase 1.016483 times, for a unit increase in seniority.
+  + The odds of paper being cited decrease 0.9586821 times, for a unit increase in the number of female-coauthors.
+  + cf. coefficient for seniority_paper 0.016348629 / female_coauthors_paper -0.042195736
+```{r include=FALSE}
+exp(0.016348629)
+exp(-0.042195736)
+```
+
+* **Is this causal?**
+  + Cannot say this effect is causal.
+  + Because, in order for the effect $\gamma$ to be causal, it must represent change in y when d moves independent of any other influencers (both in x or those we’ve ommitted). 
+  + But since many of our inputs are likely to be depedent on each other.
+  + (ex1. Some words are frequently used togheter in certain statistics field.)
+  + (ex2. Higher seniority can imply higher number of coauthors, since scholars can easily cooperate other scholars when they are experienced and well known in the field.)
+  
+  
+## 3.1 
+
+Explore the association between citations and gender 
+
+* **Graphical association**
+
+```{r include=FALSE, fig.width = 4, fig.height = 3, fig.align = "center"}
+# QUESTION 3 
+# let's create the treatment variable
+d<-paper_covariates$female_coauthors_paper
+
+# The odds of paper being citated decrease by 0.7666159 with a unit increase in the number of female coauthors.
+
+summary(marginal <- glm(Outcome ~ d, family = "binomial"))
+exp(coef(marginal)["d"])
+```
+```{r echo=FALSE}
+plot(d, marginal$fitted.values, main = "Figure 3: Relationship between citations and gender",
+     xlab = "Number of female coauthors", ylab= "Probability of citation")
+```
+
+* **Using a marginal regression**
+  + The odds of paper being citated decrease by 0.7666159 with a unit increase in the number of female coauthors.
+  
+```{r, include=FALSE}
+# 3.1
+# Stage 1 LASSO: fit a model for d on x
+# Create a design matrix using paper_covariates and words in spm
+# Continue on your own
+
+paper_covariates3 <-
+  sparse.model.matrix( ~ -citation + year + journal + references + seniority_paper +
+                         nauthors - female_coauthors_paper, data = paper_covariates)
+spm_3 <- cbind(paper_covariates3, spm)
+dim(spm_3)
+
+X1 <- spm_3
+
+# Here we use Poisson regression for counts, because d is a count variable
+treatfit <- gamlr(X1, d, family="poisson") 
+summary(treatfit)
+plot(treatfit)
+
+coef(treatfit)
+```
+* **Interpret the coefficient from your marginal regression (Y on d).**
+  + The odds of paper being cited decreases 0.9369175 times, for a unit increase in the number of female coauthors. 
+  + coefficient from marginal regression is -0.06516
+```{r include=FALSE}
+# female coauthor increases, decrease citation by 0.06
+print(glm(Outcome ~ d))
+print(exp(-0.06516))
+```
+
+* Predict d from x (title words and other predictors) using Poisson regression (see the code for guidance on Poisson regression)  
+
+```{r, include=FALSE}
+# Extract dhat from treatfit
+
+dhat <- predict(treatfit, X1)
+plot(dhat, d)
+
+# method 1
+D <- sum( (d-dhat)^2 )
+D0 <- sum( (d-mean(d))^2 ) 
+1-D/D0
+
+# method 2
+dev <- treatfit$deviance[which.min(AICc(treatfit))] # this is the deviance #of the AICc selected model
+dev0<- treatfit$deviance[1] # this is the null deviance
+#(you could have fitted a null model and get it from glm, that is fine)
+1-dev/dev0 # not much signal
+```
+
+
+* **Comment on the degree of confounding we can expect.** 
+  + in-sample $R^{2}$ for first stage regression is 0.08794358 
+  + This implies 8.79% of deviance in d is explained by x (title words and other predictors)
+  + We have some in-sample variation. This means that we have some signal to measure for effect of d after controlling for the given x.
+  
+* **Is there any information in d independent of x?**
+  + Yes, in-sample $R^{2}$ is not 1, so we can say that there are information in d indepedent of x. 
+  + Actually, there’s lots of independent variation upon which we can measure a treatment effect.
+  
+
+## 3.2 
+
+Isolate the effect of d by running the causal (double) LASSO. 
+
+```{r include=FALSE}
+# 3.2
+# Stage 2 LASSO: fit a model for Outcome using d, dhat and X1
+double_LASSO <- gamlr(cbind("d" = d, "dhat" = dhat, X1), Outcome, family="binomial")
+
+double_LASSO <- gamlr(cBind(d,dhat,X1), Outcome, family="binomial")
+
+cBind(d,dhat,X1)
+
+coef(double_LASSO)["d",]
+
+```
+
+
+* **Interpret this effect**
+  + The odds of being cited will decrease 0.9578147 times with the number of female coauthors increases by a unit. (predicted from d and x, after influence of d is removed)
+  + cf. Coefficient of double LASSO(=-0.04310096) predicts what will happen if we change d independently.
+
+```{r include=FALSE}
+exp(-0.04310096)
+```
+
+* **Compare the effect of double LASSO to the effect obtained from the naive LASSO.**
+  + -0.04219574 is naive LASSO effect
+  + -0.04310096 is double LASSO effect
+  + Effects are pretty close. They only have 0.0009052252 difference. 
+  + Because treatment is already mostly independent from controls (d, number of female coauthors was not easy to predict, as we saw in 3.1).
+
+```{r include=FALSE}
+coef(naive_lasso)["female_coauthors_paper",]
+coef(double_LASSO)["d",]
+coef(naive_lasso)["female_coauthors_paper",]-coef(double_LASSO)["d",]
+```
+
+
+## 3.3 Consider the estimated treatment effect for d. We want to know how variable this estimate is and construct confidence intervals for inference. 
+
+```{r include=FALSE}
+# Bootstrap
+
+clusterExport(cl,"X1")
+clusterExport(cl,"d")
+clusterExport(cl,"Outcome")
+
+# run 1000 bootstrap resample fits
+
+boot_function <- function(ib){
+
+	require(gamlr)
+
+	treatfit <- gamlr(X1[ib,],d[ib],family="poisson") 
+
+	dhat <- predict(treatfit, X1)  # You need to fill in this line
+
+	double_LASSO <- gamlr(cbind("d" = d, "dhat" = dhat, X1), Outcome, family="binomial") # You need to fill in this line
+
+	coef(double_LASSO)["d",]
+
+}
+
+boots <- 1000
+
+n <- nrow(spm)
+
+resamp <- as.data.frame(
+			matrix(sample(1:n,boots*n,replace=TRUE),
+			ncol=boots))
+
+# it takes quite a while to compute this
+d_samp <- unlist(parLapply(cl,resamp,boot_function)) 
+
+sd(d_samp) #0.002133966
+quantile(d_samp,0.025);quantile(d_samp,0.975) #(-0.04530596, -0.0361276 )
+```
+
+* **What is the standard error for the treatment effect d?**
+  + 0.002133966 is standard error for the treatment effect d.
+
+* **Find the 95% CI for d?**
+  + See CI marked on the graph (-0.04530596, -0.0361276)  
+  
+  
+```{r echo=FALSE, fig.width = 4, fig.height = 3, fig.align = "center"}
+{hist(d_samp, col="grey70", xlab="gamma", main="Figure 4: Bootstrapped sampling distribution with 95% CI",breaks=30)
+abline(v=quantile(d_samp,0.025),col=3,lwd=2)
+abline(v=quantile(d_samp,0.975),col=3,lwd=2)}
+```
+
+* **Can we safely claim that the effect is causal?**
+  + No, we should still be careful to claim the effect causally. 
+  + In order to claim the causal effect of double LASSO, the effect of X should effect Y only through d.
+  + We've found the best predictor for y from d and x, after influence of $\hat{d}$ is removed.
+  + However, we still have possibility of X(title words and other predictors) effecting Y(citation binary outcome) not through d(number of female coauthors), we should not conclude the effect as causal effect.
+
+  
+  
+  
+<div style="page-break-after: always; visibility: hidden"> 
+\pagebreak 
+</div>
+
+# APPENDIX (R codes for analysis)
+
+```{r echo=T, results='hide', fig.show='hide'}
+###### QUESTION 1 
+# FDR: we want to pick a few words in paper titles that correlate with citations 
+
+spm<-sparseMatrix(
+		i=doc_word[,1], #V1
+		j=doc_word[,2], #V2
+		x=doc_word[,3], #V3
+		dimnames=list(id=1:nrow(paper),words=words[,1]))
+dim(spm)
+# 3248 research articles 
+# using 686 alphabetically ordered words that occur in the titles of the research articles
+
+# create a dense matrix of ordered words that occur in the titles of the research articles
+P <- as.data.frame(as.matrix(spm>0))
+
+library(parallel)
+Outcome_continuous<-log(paper_covariates$citation+1)
+
+margreg <- function(x){
+	
+	fit <- lm(Outcome_continuous~x)
+
+	sf <- summary(fit)
+
+	return(sf$coef[2,4]) 
+
+}
+
+cl <- makeCluster(detectCores())
+
+# **** FDR Analysis ****
+# Pull out stars and export to cores
+clusterExport(cl,"Outcome_continuous") 
+
+# run the regressions in parallel
+# The p-values are stored in mrgpvals
+mrgpvals <- unlist(parLapply(cl,P,margreg))
+
+# mrgpvals<-apply(P,2,margreg) try this is parallel does not work
+source("fdr.R")
+
+# make sure we have names
+names(mrgpvals) <- colnames(P)
+
+# The p-values are stored in mrgpvals 
+
+
+##### 1.1
+hist(mrgpvals,col="lightblue",breaks=10, main = "Figure1: Histogram of p-values", xlab = "p-value") 
+
+##### 1.2
+q<-0.2
+cutoff <- fdr_cut(mrgpvals, q)
+print(cutoff)
+
+library(knitr)
+kable(table(mrgpvals<=cutoff))
+
+##### 1.3
+kable(table(mrgpvals<0.008)) #@q=0.008
+
+##### 2.1
+
+# First, let's use just words in `spm` as predictors
+library(gamlr)
+class(spm)
+
+# let's call the columns of the sparse design matrix as the product categories
+
+# Let's fit the LASSO with just the product categories
+lasso1<- gamlr(spm, y=Outcome_continuous, standardize=FALSE, family="gaussian", lambda.min.ratio=1e-3)
+plot(lasso1)
+
+log(lasso1$lambda[which.min(AICc(lasso1))]) # -6.022561 
+
+dev <- lasso1$deviance[which.min(AICc(lasso1))] # this is the deviance #of the AICc selected model
+dev0<- lasso1$deviance[1] # this is the null deviance
+1-dev/dev0 # in sample R square 0.08006071 not much signal
+
+##### 2.2
+# Now, let's add more covariates
+# include all the covariates in the matrix 'paper_covariates'
+# be carefull about the treatment of the factor covariates
+
+paper_covariates1 <-
+  sparse.model.matrix( ~ -1 + year + journal + references + seniority_paper + 
+                         nauthors + female_coauthors_paper, data = paper_covariates)
+spm_2 <- cbind(paper_covariates1, spm)
+dim(spm_2)
+
+lasso2<- gamlr(spm_2, y=Outcome_continuous, standardize=TRUE, family="gaussian", lambda.min.ratio=1e-3)
+plot(lasso2)
+
+summary(lasso2) %>%
+  arrange(desc(lambda))
+
+order(coef(lasso2))
+
+
+coef(lasso2)
+
+# top 10 strongest coefficients
+df <- as.data.frame(as.matrix(coef(lasso2)))
+
+
+log(lasso2$lambda[which.min(AICc(lasso2))]) #-3.240777  
+
+dev_2 <- lasso2$deviance[which.min(AICc(lasso2))] # this is the deviance #of the AICc selected model
+dev0_2<- lasso2$deviance[1] # this is the null deviance
+1-dev_2/dev0_2 # in sample R square 0.2135955 /not much signal
+
+plot(lasso2, xlab="log lambda for LASSO after adding extra covariates")
+
+##### 2.3 Let's create the binary outcome variable
+
+Outcome<-paper_covariates$citation>0
+
+lasso3<- gamlr(spm_2, y=Outcome, standardize=TRUE, family="binomial", lambda.min.ratio=1e-3)
+plot(lasso3)
+
+log(lasso3$lambda[which.min(AICc(lasso3))]) #-4.106775   
+
+dev_3 <- lasso3$deviance[which.min(AICc(lasso3))] # this is the deviance #of the AICc selected model
+dev0_3<- lasso3$deviance[1] # this is the null deviance
+1-dev_3/dev0_3 # in sample R square 0.1375619 /not much signal
+
+naive_lasso <- lasso3
+coef(naive_lasso)["female_coauthors_paper",]
+
+exp(0.016348629)
+exp(-0.042195736)
+
+# QUESTION 3 
+# let's create the treatment variable
+d<-paper_covariates$female_coauthors_paper
+
+# The odds of paper being citated decrease by 0.7666159 with a unit increase in the number of female coauthors.
+
+summary(marginal <- glm(Outcome ~ d, family = "binomial"))
+exp(coef(marginal)["d"])
+
+plot(d, marginal$fitted.values, main = "Figure 3: Relationship between citations and gender",
+     xlab = "Number of female coauthors", ylab= "Probability of citation")
+
+##### 3.1
+# Stage 1 LASSO: fit a model for d on x
+# Create a design matrix using paper_covariates and words in spm
+# Continue on your own
+
+paper_covariates3 <-
+  sparse.model.matrix( ~ -citation + year + journal + references + seniority_paper +
+                         nauthors - female_coauthors_paper, data = paper_covariates)
+spm_3 <- cbind(paper_covariates3, spm)
+dim(spm_3)
+
+X1 <- spm_3
+
+# Here we use Poisson regression for counts, because d is a count variable
+treatfit <- gamlr(X1, d, family="poisson") 
+summary(treatfit)
+plot(treatfit)
+
+coef(treatfit)
+
+# female coauthor increases, decrease citation by 0.06
+print(glm(Outcome ~ d))
+print(exp(-0.06516))
+
+# Extract dhat from treatfit
+
+dhat <- predict(treatfit, X1)
+plot(dhat, d)
+
+# method 1
+D <- sum( (d-dhat)^2 )
+D0 <- sum( (d-mean(d))^2 ) 
+1-D/D0
+
+# method 2
+dev <- treatfit$deviance[which.min(AICc(treatfit))] # this is the deviance #of the AICc selected model
+dev0<- treatfit$deviance[1] # this is the null deviance
+#(you could have fitted a null model and get it from glm, that is fine)
+1-dev/dev0 # not much signal
+
+##### 3.2
+# Stage 2 LASSO: fit a model for Outcome using d, dhat and X1
+double_LASSO <- gamlr(cbind("d" = d, "dhat" = dhat, X1), Outcome, family="binomial")
+
+double_LASSO <- gamlr(cBind(d,dhat,X1), Outcome, family="binomial")
+
+cBind(d,dhat,X1)
+
+coef(double_LASSO)["d",]
+
+exp(-0.04310096)
+
+coef(naive_lasso)["female_coauthors_paper",]
+coef(double_LASSO)["d",]
+coef(naive_lasso)["female_coauthors_paper",]-coef(double_LASSO)["d",]
+
+##### 3.3
+# Bootstrap
+
+clusterExport(cl,"X1")
+clusterExport(cl,"d")
+clusterExport(cl,"Outcome")
+
+# run 1000 bootstrap resample fits
+
+boot_function <- function(ib){
+
+	require(gamlr)
+
+	treatfit <- gamlr(X1[ib,],d[ib],family="poisson") 
+
+	dhat <- predict(treatfit, X1)  # You need to fill in this line
+
+	double_LASSO <- gamlr(cbind("d" = d, "dhat" = dhat, X1), Outcome, family="binomial") # You need to fill in this line
+
+	coef(double_LASSO)["d",]
+
+}
+
+boots <- 1000
+
+n <- nrow(spm)
+
+resamp <- as.data.frame(
+			matrix(sample(1:n,boots*n,replace=TRUE),
+			ncol=boots))
+
+# it takes quite a while to compute this 
+# d_samp <- unlist(parLapply(cl,resamp,boot_function)) 
+
+sd(d_samp) #0.002133966
+quantile(d_samp,0.025);quantile(d_samp,0.975) #(-0.04530596, -0.0361276 )
+
+{hist(d_samp, col="grey70", xlab="gamma", main="Figure 4: Bootstrapped sampling distribution with 95% CI",breaks=30)
+abline(v=quantile(d_samp,0.025),col=3,lwd=2)
+abline(v=quantile(d_samp,0.975),col=3,lwd=2)}
+```
+
+
+
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+

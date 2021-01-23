@@ -1,0 +1,232 @@
+---
+title: "BUS 41201 Homework 1 Assignment"
+author: Group 8 (Alan Gu,Veronica Song,Xavier Pacthod,Jeong Lim Kim,Jayoung Kang,Hye-Min Jung)
+date: "4/14/2020"
+output:
+  word_document: default 
+  pdf_document: 
+    fig_height: 4
+    fig_width: 6
+fontsize: 10 pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      #include = TRUE, 
+                      fig.width = 6, fig.height = 4,
+                      results='hide',
+                      warning = FALSE,
+                      cache = TRUE,
+                      digits = 3,
+                      width = 48) 
+```
+# Amazon Reviews
+
+The dataset consists of 13 319 reviews for selected products on Amazon from Jan-Oct 2012.  Reviews include product information, ratings, and a plain text review. The data consists of three tables:
+
+##Review subset.csv
+is a table containing, for each review, its 
+\begin{itemize}
+\item ProductId: Amazon ASIN product code
+\item UserId: ID of the reviewer
+\item Score: numeric 1-5 (the number of stars)
+\item Time: date of the review
+\item Summary: review summary in words
+\item Nrev: number of reviews by the user
+\item Length: number of words in the review
+\item Prod Category: Amazon product category 
+\item Prod Group: Amazon product group
+\end{itemize}
+## Word freq.csv
+is a simple triplet matrix of word counts from the review text including 
+\begin{itemize}
+\item Review ID: the row index of Review subset.csv
+\item Word ID: the row index of words.csv
+\item Times Word: how many times the word occurred in the review
+\end{itemize}
+## Words.csv
+contains 1125 alphabetically ordered words that occur in the reviews. 
+
+\clearpage
+
+
+## Data exploration
+
+The code below loads the data.
+
+```{r data xtable, results='asis'}
+
+library(knitr) # library for nice R markdown output
+
+
+# READ REVIEWS
+
+data<-read.table("Review_subset.csv",header=TRUE)
+dim(data)
+
+# 13319 reviews
+# ProductID: Amazon ASIN product code
+# UserID:  id of the reviewer
+# Score: numeric from 1 to 5
+# Time: date of the review
+# Summary: text review
+# nrev: number of reviews by this user
+# Length: length of the review (number of words)
+
+# READ WORDS
+
+words<-read.table("words.csv")
+words<-words[,1]
+length(words)
+#1125 unique words
+
+# READ text-word pairings file
+
+doc_word<-read.table("word_freq.csv")
+names(doc_word)<-c("Review ID","Word ID","Times Word" )
+# Review ID: row of the file  Review_subset
+# Word ID: index of the word
+# Times Word: number of times this word occurred in the text
+
+
+
+
+```
+
+## Marginal Regression Screening
+
+We would like to pre-screen words that associate with ratings. To this end,  we run a series of (independent)
+marginal regressions  of review Score on word presence  in review text for each of  1125 words. 
+
+In the starter script below, you  will find a code to run these marginal regressions (both in parallel and sequentially). The code gives you a set of p-values for a marginal effect of each word. That is, we fit
+$$
+{\tt stars}_i = \alpha + \beta_j I{[x_{ji}>0]} + \epsilon_{ji}
+$$
+for each word term $j$ with count $x_{ji}$ in review $i$, and return the p-value associated with a test of $\beta_{j}\neq0$. We'll use these 1125 independent regressions to screen words.
+
+
+```{r data, results='asis'}
+
+# We'll do 1125 univariate regressions of 
+# star rating on word presence, one for each word.
+# Each regression will return a p-value, and we can
+# use this as an initial screen for useful words.
+
+# Don't worry if you do not understand the code now.
+# We will go over similar code in  the class in a few weeks.
+
+# Create a sparse matrix of word presence
+
+
+library(gamlr)
+
+spm<-sparseMatrix(i=doc_word[,1],
+                  j=doc_word[,2],
+                  x=doc_word[,3],
+                  dimnames=list(id=1:nrow(data),words=words))
+
+dim(spm)
+# 13319 reviews using 1125 words
+
+# Create a dense matrix of word presence
+
+P <- as.data.frame(as.matrix(spm>0))
+
+library(parallel)
+
+margreg <- function(p){
+	fit <- lm(stars~p)
+	sf <- summary(fit)
+	return(sf$coef[2,4]) 
+}
+
+# The code below is an example of parallel computing
+# No need to understand details now, we will discuss more later
+
+cl <- makeCluster(detectCores())
+
+# Pull out stars and export to cores
+
+stars <- data$Score
+
+clusterExport(cl,"stars") 
+
+# Run the regressions in parallel
+
+mrgpvals <- unlist(parLapply(cl,P,margreg))
+
+# If parallel stuff is not working, 
+# you can also just do (in serial):
+# mrgpvals <- c()
+# for(j in 1:1125){
+# 	print(j)
+# 	mrgpvals <- c(mrgpvals,margreg(P[,j]))
+# }
+# make sure we have names
+
+names(mrgpvals) <- colnames(P)
+
+# The p-values are stored in mrgpvals 
+
+
+```
+
+
+
+## Homework Questions:
+
+(1) Plot the p-values and comment on their distribution.  
+First plot - There is some signals to be discovered and we know that signal exists by spike/peak in the first bin. This implies that there are many more smaller p-values than we would expect.  
+Second plot - Ordered p-value ordered : If no signal, the p-values should be on the line with slope 1/p. But they are not. P-values are below the line, implying some signals.  
+```{r}
+hist(mrgpvals,col="lightblue",breaks=10)
+
+p<-1125
+pvals_ordered<-mrgpvals[order(mrgpvals,decreasing=F)]
+plot(pvals_ordered,pch=19)
+abline(0,1/p)
+```
+  
+(2) Let's do standard statistical testing. How many tests are significant at the alpha level 0.05 and 0.01?
+```{r}
+print(sum(mrgpvals<=0.05))
+print(sum(mrgpvals<=0.01))
+```
+(3) What is the p-value cutoff for 1% FDR? Plot and describe the rejection region.  
+```{r}
+source("fdr.R")
+q<-0.01
+cutoff <- fdr_cut(mrgpvals, q)
+print(cutoff)
+```  
+Green line: cutoff point(0.002413249) drawn vertically. Rejection region is red line, more specifically everything BELOW the red line under the cutoff point is called significant and considered as discoveries. Everything above the red line above the cutoff point is non discoveries.
+```{r}
+p<-1125
+plot(pvals_ordered,pch=19)
+abline(h=cutoff,lty=2,col=3,lwd=3)
+abline(0,q/p,col=2,lwd=2)
+```
+(4) How many discoveries do you find at q=0.01 and how many do you expect to be false?
+
+```{r}
+plot(pvals_ordered,pch=19)
+abline(h=cutoff,lty=2,col=3,lwd=3)
+abline(0,q/p,col=2,lwd=2)
+
+signif <- pvals_ordered <= cutoff  
+points(pvals_ordered,
+	   col=signif+1,pch=19) # The red dots are discoveries
+```
+```{r}
+print(sum(pvals_ordered <= cutoff)) #290 discoveries p-values below(cutoff point) the line out of 1125
+table(pvals_ordered<=cutoff) # number of discoveries and non-discoveries
+```
+Number of false discoveries: 290
+Expected number of false discoveries: 290*0.01=2.9 
+
+(5) What are the 10 most significant words? Do these results make sense to you? What are the advantages and disadvantages of our FDR anaysis?
+```{r}
+names(pvals_ordered)[order(pvals_ordered)[1:10]] 
+````
+Advantage : By using FDR, I can limite the number of mistakes. 
+Disadvantage : Although we know the number of false but we cannot know which is false. Also, FDR assumes that p-values are independent. So if p-values are correlated, we cannot use FDR.

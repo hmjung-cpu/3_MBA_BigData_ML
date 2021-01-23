@@ -1,0 +1,209 @@
+---
+title: "Homework 3"
+author: Jeong lim Kim, Jayoung Kang, Hye-Min Jung
+date: "4/29/2020"
+fontsize: 10 pt
+output:
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      #include = TRUE, 
+                      fig.width = 6, fig.height = 4,
+                      results='markup',
+                      warning = FALSE,
+                      cache = TRUE,
+                      digits = 3,
+                      width = 48) 
+```
+
+```{r data xtable, results='asis', include=FALSE}
+# Amazon Reviews
+
+# The dataset consists of 13 319 reviews for selected products on Amazon from Jan-Oct 2012. Reviews include product information, ratings, and a plain text review. The data consists of 3 tables: Review subset.csv, Word freq.csv, Words.csv
+
+library(tidyverse)
+library(dplyr)
+library(knitr) # library for nice R markdown output
+
+# 1. READ REVIEWS
+data<-read.table("Review_subset.csv",header=TRUE)
+dim(data)
+
+# 2. READ text-word pairings file
+doc_word<-read.table("word_freq.csv")
+names(doc_word)<-c("Review ID","Word ID","Times Word" )
+
+# 3. READ WORDS
+words<-read.table("words.csv")
+words<-words[,1]
+length(words)
+```
+
+## Question 1
+
+We want to build a predictor of customer ratings from product reviews and product attributes. For these questions, you will fit a LASSO path of logistic regression using a binary outcome: Y=1 for  5 stars, Y=0 for less than 5 stars.  
+
+Fit a LASSO model with only product categories. The start code prepares a sparse design matrix of 142 product categories. 
+
+* What is the in-sample R2 for the AICc slice of the LASSO path? 
+  + 0.1048737
+
+* Why did we use standardize FALSE?  
+  + `standardize` argument is used to specify whether to standardize the coefficients to have standard deviation of 1. This is equivalent to multiplying the L1 penalty by each coefficient standard deviation. By default, we have `standardize=TRUE` in `gamlr` function and you specify as FALSE only with a good reason.   
+  
+  + Here we do have a good reason for not standardizing the coefficients. Standardization/normalization of features is done to bring all features to a similar scale. So, if you code categorical variables which are either 0/1 there is not much scale difference by standardizing like 10~1000. Hence there is no need to apply techniques for standardization.
+
+
+```{r data, results='asis'}
+#1. Fit a LASSO path of logistic regression using a binary outcome: Y=1 for  5 stars, Y=0 for less than 5 stars.
+# Let's define the binary outcome
+# Y=1 if the rating was 5 stars, Y=0 otherwise
+Y<-as.numeric(data$Score==5)
+
+#2. Fit a LASSO model with only product categories. 
+# (a) Use only product category as a predictor
+library(gamlr)
+source("naref.R") 
+class(data$Prod_Category)
+
+# Since product category is a factor, we want to relevel it for the LASSO. 
+# We want each coefficient to be an intercept for each factor level rather than a contrast. 
+# Check the extra slides at the end of the lecture.
+# look inside naref.R. This function relevels the factors for us.
+
+data$Prod_Category<-naref(data$Prod_Category) ## naref: make missing (NA) the reference level of a factor
+
+# Create a design matrix using only products
+
+products<-data.frame(data$Prod_Category)
+
+x_cat<-sparse.model.matrix(~., data=products)[,-1]
+
+# Sparse matrix, storing 0's as .'s 
+# Remember that we removed intercept so that each category is standalone, not a contrast relative to the baseline category
+
+colnames(x_cat)<-levels(data$Prod_Category)[-1]
+
+# let's call the columns of the sparse design matrix as the product categories
+# Let's fit the LASSO with just the product categories
+
+lasso1<- gamlr(x_cat, y=Y, standardize=FALSE, family="binomial", lambda.min.ratio=1e-3)
+plot(lasso1)
+
+
+#2. What is the in-sample R2 for the AICc slice of the LASSO path?
+# AICc selected coef
+scbeta <- coef(lasso1) #this gives the slice and corresponds to AICc 
+log(lasso1$lambda[which.min(AICc(lasso1))])
+sum(scbeta!=0) # chooses 139 (+intercept) @ log(lambda) = -11.13165 
+
+source("deviance.R") 
+Yhat <- predict(lasso1, newdata=x_cat, type="response")
+
+R2(Y, Yhat, family = "binomial") # 0.1048737
+
+summary(lasso1)$r2[which.min(AICc(lasso1))] # 0.1048737
+```
+
+
+## Question 2
+
+Fit a LASSO model with both product categories and the review content (i.e. the frequency of occurrence of words). 
+
+* Use AICc to select lambda.
+    + log(lambda) = -8.334091
+
+* How many words were selected as predictive of a 5 star review? 
+  + 1022 words were selected as predictive of a 5 star review
+    
+* Which 10 words have the most positive effect on odds of a 5 star review? 
+
+ | 10 most +effect on odds of review |
+ |-----------------------------------|
+ | 1  | worried            |10.516545|
+ | 2  | Breads             |9.260972 |
+ | 3  | plus               |9.175674 |
+ | 4  | Almonds            |9.148234 |
+ | 5  | Leaveners & Yeasts |8.674096 | 
+ | 6  | excellently        |8.375464 |
+ | 7  | find               |7.422606 |
+ | 8  | grains             |7.250390 |
+ | 9  | Computers Features |7.189896 |
+ | 10 | hound              |7.179146 |
+
+* What is the interpretation of the coefficient for the word `discount'? 
+  + The word 'discount' included in the review multiplies the odds of 5 star review by 1055.256, compare to the review without word 'discount'.
+
+```{r xtable, results='asis'}
+
+# Fit a LASSO with all 142 product categories and 1125 words 
+spm<-sparseMatrix(i=doc_word[,1],
+                  j=doc_word[,2],
+                  x=doc_word[,3],
+                  dimnames=list(id=1:nrow(data),
+                  words=words))
+dim(spm) # 13319 reviews using 1125 words
+
+x_cat2<-cbind(x_cat,spm)
+
+lasso2 <- gamlr(x_cat2, y=Y, lambda.min.ratio=1e-3, family="binomial")
+plot(lasso2)
+
+# AICc selected coef
+scbeta2 <- coef(lasso2) #this gives the slice and corresponds to AICc 
+log(lasso2$lambda[which.min(AICc(lasso2))])
+sum(scbeta2!=0) # chooses 1154 (intercept) @ log(lambda) = -8.334091 
+length(scbeta2)
+
+sum(scbeta2[(ncol(x_cat)+1):nrow(scbeta2)]!=0)
+
+coef(lasso2)[order(-coef(lasso2))[1:10],]
+
+
+beta3 <- coef(lasso2)[(ncol(x_cat)+1):nrow(scbeta2),]
+beta3[order(beta3,decreasing=TRUE)[1:10]]
+
+# 6.961538581
+
+exp(6.961538581)
+
+```
+
+
+
+## Question 3
+
+Continue with the model from Question 2.
+Run cross-validation to obtain the best lambda value that minimizes OOS deviance. 
+
+* How many coefficients are nonzero then?  
+  + At the best lambda value(-11.13165) that minimizes OOS deviance, 988 coefficients are non-zero.  
+  
+* How many are nonzero under the 1se rule?  (1 point)  
+  + 831 are non-zero under the 1 se away from the mimum OOS deviance.
+  
+```{r xtable data, results='asis',include=FALSE}
+set.seed(123) 
+cv.fit <- cv.gamlr(x_cat2,
+				   y=Y,
+				   lambda.min.ratio=1e-3,
+				   family="binomial",
+				   verb=TRUE)
+
+log(lasso1$lambda[which.min(AICc(lasso1))])
+
+plot(cv.fit, bty="n")
+
+## CV min deviance selection
+scb.min <- coef(cv.fit, select="min")
+log(cv.fit$lambda.min)
+sum(scb.min!=0) ## around 974 with log(lam) -6.589709 (its random!)
+
+## CV 1se selection (the default)
+scb.1se <- coef(cv.fit)
+log(cv.fit$lambda.1se)
+sum(scb.1se!=0) ## usually selects all zeros (just the intercept)
+```
+
